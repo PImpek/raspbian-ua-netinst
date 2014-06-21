@@ -11,8 +11,30 @@ hostname=pi
 domainname=
 rootpw=raspbian
 cdebootstrap_cmdline=
+# $rorootpartition - ReadOnly root partition, useful when device must work stable after power failure.
+# this modification is based on https://wiki.debian.org/ReadonlyRoot, last edit 2014-02-04 23:20:23
+# when set to true - $rootsize must be defined.
+# when set to false- partition for variable data will not be created, 
+# so  $varsize, $varfstype, $vardev, $varpartition will be ignored.
+# special files in /etc : 
+# not present | adjtime
+# not present | alsa: init.d/alsa-utils
+# done        | blkid.tab
+# not present | cmtab
+# not present | cups
+# not present | lvm
+# done        | mtab
+# automatic   | network/run
+# not present | nologin
+# done        | resolv.conf
+# manual      | passwd, shadow
+# not present | samba/dhcp.conf
+# not present | suck
+# done        |udev
+rorootpartition=true
 bootsize=+50M
-rootsize=
+rootsize=+1000M
+varsize=
 timeserver=time.nist.gov
 ip_addr=dhcp
 ip_netmask=0.0.0.0
@@ -23,12 +45,20 @@ online_config=
 usbroot=
 cmdline="dwc_otg.lpm_enable=0 console=ttyAMA0,115200 kgdboc=ttyAMA0,115200 console=tty1 elevator=deadline"
 rootfstype=ext4
+varfstype=ext4
 
 # these shouldn't really be changed unless auto-detection fails
 bootdev=/dev/mmcblk0
 bootpartition=/dev/mmcblk0p1
 rootdev=/dev/mmcblk0
 rootpartition=
+# varpartition will be on the same device as rootpartition
+varpartition=
+
+if [ "$rorootpartition" = true ] && [ "$rootsize" = "" ] ; then
+    echo "FAILED, rootsize is not defined."
+    fail
+fi
 
 fail()
 {
@@ -117,27 +147,70 @@ if [ -e /bootfs/installer-config.txt ]; then
     source /bootfs/installer-config.txt
     echo "OK"
 fi
+if [ "$rorootpartition" = true ] ; then
+    case "$rootfstype" in
+      "btrfs")
+	kernel_module=true
+	rootfs_mkfs_options=${rootfs_mkfs_options:-'-f'}
+	rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime'}
+	rootfs_mount_options=${rootfs_mount_options:-'ro, noatime'}
+	;;
+      "ext4")
+	kernel_module=true
+	rootfs_mkfs_options=${rootfs_mkfs_options:-'-O ^has_journal'}
+	rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime,noinit_itable'}
+	rootfs_mount_options=${rootfs_mount_options:-'ro,noatime'}
+	;;
+      "f2fs")
+	kernel_module=true
+	rootfs_mkfs_options=${rootfs_mkfs_options:-''}
+	rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime'}
+	rootfs_mount_options=${rootfs_mount_options:-'ro,noatime'}
+	;;
+    esac
 
-case "$rootfstype" in
-  "btrfs")
-    kernel_module=true
-    rootfs_mkfs_options=${rootfs_mkfs_options:-'-f'}
-    rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime'}
-    rootfs_mount_options=${rootfs_mount_options:-'noatime'}
-    ;;
-  "ext4")
-    kernel_module=true
-    rootfs_mkfs_options=${rootfs_mkfs_options:-''}
-    rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime,data=writeback,nobarrier,noinit_itable'}
-    rootfs_mount_options=${rootfs_mount_options:-'errors=remount-ro,noatime'}
-    ;;
-  "f2fs")
-    kernel_module=true
-    rootfs_mkfs_options=${rootfs_mkfs_options:-''}
-    rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime'}
-    rootfs_mount_options=${rootfs_mount_options:-'errors=remount-ro,noatime'}
-    ;;
-esac
+    case "$varfstype" in
+      "btrfs")
+	kernel_module=true
+	varfs_mkfs_options=${varfs_mkfs_options:-'-f'}
+	varfs_install_mount_options=${varfs_install_mount_options:-'noatime'}
+	varfs_mount_options=${varfs_mount_options:-'noatime'}
+	;;
+      "ext4")
+	kernel_module=true
+	varfs_mkfs_options=${varfs_mkfs_options:-''}
+	varfs_install_mount_options=${varfs_install_mount_options:-'noatime'}
+	varfs_mount_options=${varfs_mount_options:-'noatime'}
+	;;
+      "f2fs")
+	kernel_module=true
+	varfs_mkfs_options=${varfs_mkfs_options:-''}
+	varfs_install_mount_options=${varfs_install_mount_options:-'noatime'}
+	varfs_mount_options=${varfs_mount_options:-'noatime'}
+	;;
+    esac
+else # rw root prartition
+  case "$rootfstype" in
+    "btrfs")
+      kernel_module=true
+      rootfs_mkfs_options=${rootfs_mkfs_options:-'-f'}
+      rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime'}
+      rootfs_mount_options=${rootfs_mount_options:-'noatime'}
+      ;;
+    "ext4")
+      kernel_module=true
+      rootfs_mkfs_options=${rootfs_mkfs_options:-''}
+      rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime,data=writeback,nobarrier,noinit_itable'}
+      rootfs_mount_options=${rootfs_mount_options:-'errors=remount-ro,noatime'}
+      ;;
+    "f2fs")
+      kernel_module=true
+      rootfs_mkfs_options=${rootfs_mkfs_options:-''}
+      rootfs_install_mount_options=${rootfs_install_mount_options:-'noatime'}
+      rootfs_mount_options=${rootfs_mount_options:-'errors=remount-ro,noatime'}
+      ;;
+  esac
+fi
 
 echo
 echo "Network configuration:"
@@ -208,11 +281,16 @@ fi
 if [ "$cdebootstrap_cmdline" = "" ]; then
 
     # minimal
-    cdebootstrap_cmdline="--flavour=minimal --include=kmod,fake-hwclock,ifupdown,net-tools,ntp,openssh-server$dhcp_packages"
+    cdebootstrap_cmdline="--flavour=minimal --include=kmod,fake-hwclock,net-tools,ntp,resolvconf,openssh-server$dhcp_packages"
 
     # add dhcp client if using dhcp
     if [ "$ip_addr" = "dhcp" ]; then
         cdebootstrap_cmdline="$cdebootstrap_cmdline,isc-dhcp-client"
+    fi
+    
+    #resolvconf if using readonly rootpartition 
+    if [ "$rorootpartition" = true ] ; then
+	    cdebootstrap_cmdline="$cdebootstrap_cmdline,resolvconf"
     fi
 
     # add latest kernel if rootfstype requires a module. 
@@ -258,8 +336,10 @@ fi
 if [ "$rootpartition" = "" ]; then
     if [ "$rootdev" = "/dev/sda" ]; then
         rootpartition=/dev/sda1
+        varpartition=/dev/sda2
     else
         rootpartition=/dev/mmcblk0p2
+        varpartition=/dev/mmcblk0p3
     fi
 fi
 
@@ -284,6 +364,7 @@ echo "  rootfstype = $rootfstype"
 echo "  rootfs_mkfs_options = $rootfs_mkfs_options"
 echo "  rootfs_install_mount_options = $rootfs_install_mount_options"
 echo "  rootfs_mount_options = $rootfs_mount_options"
+echo "  rorootpartition = $rorootpartition" 
 echo
 
 if [ "$timeserver" != "" ]; then
@@ -313,11 +394,69 @@ for i in `seq 1 10`; do
 
     echo -n "$i.. "
 done
+if [ "$rorootpartition" = true ] ; then
+    if [ "$rootdev" = "$bootdev" ] ; then
+	echo -n "Applying new partition table... "
+	dd if=/dev/zero of=$bootdev bs=512 count=1 &>/dev/null
+	fdisk $bootdev &>/dev/null <<EOF
+n
+p
+1
 
-if [ "$rootdev" = "$bootdev" ]; then
-    echo -n "Applying new partition table... "
-    dd if=/dev/zero of=$bootdev bs=512 count=1 &>/dev/null
-    fdisk $bootdev &>/dev/null <<EOF
+$bootsize
+t
+b
+n
+p
+2
+
+$rootsize
+n
+p
+3
+
+$varsize
+w
+EOF
+	echo "OK"
+    else
+	echo -n "Applying new partition table for $bootdev... "
+	dd if=/dev/zero of=$bootdev bs=512 count=1 &>/dev/null
+	fdisk $bootdev &>/dev/null <<EOF
+n
+p
+1
+
+$bootsize
+t
+b
+w
+EOF
+	echo "OK"
+
+	echo -n "Applying new partition table for $rootdev... "
+	dd if=/dev/zero of=$rootdev bs=512 count=1 &>/dev/null
+	fdisk $rootdev &>/dev/null <<EOF
+n
+p
+1
+
+$rootsize
+n
+p
+2
+
+$varsize
+w
+EOF
+	echo "OK"
+
+    fi
+else # rw root partition
+    if [ "$rootdev" = "$bootdev" ] ; then
+	echo -n "Applying new partition table... "
+	dd if=/dev/zero of=$bootdev bs=512 count=1 &>/dev/null
+	fdisk $bootdev &>/dev/null <<EOF
 n
 p
 1
@@ -332,11 +471,11 @@ p
 $rootsize
 w
 EOF
-    echo "OK"
-else
-    echo -n "Applying new partition table for $bootdev... "
-    dd if=/dev/zero of=$bootdev bs=512 count=1 &>/dev/null
-    fdisk $bootdev &>/dev/null <<EOF
+	echo "OK"
+    else
+	echo -n "Applying new partition table for $bootdev... "
+	dd if=/dev/zero of=$bootdev bs=512 count=1 &>/dev/null
+	fdisk $bootdev &>/dev/null <<EOF
 n
 p
 1
@@ -346,11 +485,11 @@ t
 b
 w
 EOF
-    echo "OK"
+	echo "OK"
 
-    echo -n "Applying new partition table for $rootdev... "
-    dd if=/dev/zero of=$rootdev bs=512 count=1 &>/dev/null
-    fdisk $rootdev &>/dev/null <<EOF
+	echo -n "Applying new partition table for $rootdev... "
+	dd if=/dev/zero of=$rootdev bs=512 count=1 &>/dev/null
+	fdisk $rootdev &>/dev/null <<EOF
 n
 p
 1
@@ -358,10 +497,10 @@ p
 $rootsize
 w
 EOF
-    echo "OK"
+	echo "OK"
 
+    fi
 fi
-
 echo -n "Initializing /boot as vfat... "
 mkfs.vfat $bootpartition &>/dev/null || fail
 echo "OK"
@@ -372,22 +511,56 @@ if [ "$kernel_module" = true ] ; then
     modprobe $rootfstype &> /dev/null || fail
     echo "OK"
   fi
+  if [ "$varfstype" != "ext4" ] && [ "$varfstype" != "$rootfstype" ] ; then
+    echo -n "Loading $varfstype module... "
+    modprobe $varfstype &> /dev/null || fail
+    echo "OK"
+  fi
 fi
 
 echo -n "Initializing / as $rootfstype... "
 mkfs.$rootfstype $rootfs_mkfs_options $rootpartition &>/dev/null || fail
 echo "OK"
 
+if [ "$rorootpartition" = true ] ; then
+  echo -n "Initializing /var as $varfstype... "
+  mkfs.$varfstype $varfs_mkfs_options $varpartition &>/dev/null || fail
+  echo "OK"
+fi
+
 echo -n "Mounting new filesystems... "
 mount $rootpartition /rootfs -o $rootfs_install_mount_options || fail
 mkdir /rootfs/boot || fail
 mount $bootpartition /rootfs/boot || fail
+
+if [ "$rorootpartition" = true ] ; then
+  mkdir /rootfs/var || fail
+  mount $varpartition /rootfs/var -o $rootfs_install_mount_options || fail
+fi
+
 echo "OK"
 
 echo -n "Copying /boot files in... "
 cp /bootfs/* /rootfs/boot || fail
 sync
 echo "OK"
+
+if [ "$rorootpartition" = true ] ; then
+  echo -n "Creating and mounting directories for variable data"
+  mkdir /rootfs/var/local/ || fail
+  # home directory
+  mkdir /rootfs/home || fail
+  mkdir /rootfs/var/local/home || fail
+  mount -o bind /rootfs/var/local/home /rootfs/home || fail
+  # srv directory
+  mkdir /rootfs/srv || fail
+  mkdir /rootfs/var/local/srv || fail
+  mount -o bind /rootfs/var/local/srv /rootfs/srv || fail
+  # etc directory, etc is not mounted, only some files needs write access.
+  mkdir /rootfs/etc || fail
+  mkdir /rootfs/var/local/etc || fail 
+  echo "OK"
+fi
 
 if [ "$kernel_module" = true ] ; then
   if [ "$rootfstype" != "ext4" ] ; then
@@ -407,13 +580,22 @@ echo "OK"
 
 # default mounts
 echo -n "  Configuring /etc/fstab... "
-echo "$bootpartition /boot vfat defaults 0 2" > /rootfs/etc/fstab || fail
-if [ "$rootfstype" = "f2fs" ]; then
-	echo "$rootpartition / $rootfstype $rootfs_mount_options 0 0" >> /rootfs/etc/fstab || fail
-elif [ "$rootfstype" = "btrfs" ]; then
-	echo "$rootpartition / $rootfstype $rootfs_mount_options 0 0" >> /rootfs/etc/fstab || fail
+if [ "$rorootpartition" = true ] ; then
+    echo "$bootpartition /boot vfat defaults 0 2" > /rootfs/etc/fstab || fail
+    echo "$rootpartition / $rootfstype $rootfs_mount_options 0 0" >> /rootfs/etc/fstab || fail
+    echo "$varpartition /var $varfstype $varfs_mount_options 0 1" >> /rootfs/etc/fstab || fail
+    echo "/var/local/home /home none bind 0 0" >> /rootfs/etc/fstab || fail
+    echo "/var/local/srv /srv none bind 0 0" >> /rootfs/etc/fstab || fail
+    echo "tmpfs /tmp tmpfs rw 0 0" >> /rootfs/etc/fstab || fail
 else
-	echo "$rootpartition / $rootfstype $rootfs_mount_options 0 1" >> /rootfs/etc/fstab || fail
+    echo "$bootpartition /boot vfat defaults 0 2" > /rootfs/etc/fstab || fail
+    if [ "$rootfstype" = "f2fs" ]; then
+	    echo "$rootpartition / $rootfstype $rootfs_mount_options 0 0" >> /rootfs/etc/fstab || fail
+    elif [ "$rootfstype" = "btrfs" ]; then
+	    echo "$rootpartition / $rootfstype $rootfs_mount_options 0 0" >> /rootfs/etc/fstab || fail
+    else
+	    echo "$rootpartition / $rootfstype $rootfs_mount_options 0 1" >> /rootfs/etc/fstab || fail
+    fi
 fi
 echo "OK"
 
@@ -510,6 +692,16 @@ fi
 # add reasonable default modules, works only after kernel is properly installed
 echo "snd-bcm2835" >> /rootfs/etc/modules
 
+if [ "$rorootpartition" = true ] ; then
+  #linking /etc/mtab to /proc/mtab
+  ln -s /proc/mounts /rootfs/etc/mtab || fail
+  # libblkid1
+  echo "BLKID_FILE=/var/local/etc/blkid.tab" >>  /rootfs/etc/environment
+  #udev
+  echo "SUBSYSTEM==\"net\", ACTION==\"add\", DRIVERS==\"?*\", ATTR{address}==\"`ifconfig eth0 | fgrep HWaddr | awk '{print $5}'`\", ATTR{dev_id}==\"0x0\", ATTR{type}==\"1\", KERNEL==\"eth*\", NAME==\"eth0\"" > /rootfs/etc/udev/rules.d/70-persistent-net.rules
+  rm /rootfs/etc/rcS.d/*udev-mtab
+fi
+
 # default cmdline.txt
 echo -n "Creating default cmdline.txt... "
 echo "$cmdline root=$rootpartition rootfstype=$rootfstype rootwait" > /rootfs/boot/cmdline.txt
@@ -528,6 +720,11 @@ sync # synchronize before saving time to make it "more accurate"
 date +"%Y-%m-%d %H:%M:%S" > /rootfs/etc/fake-hwclock.data
 
 echo -n "Unmounting filesystems... "
+if [ "$rorootpartition" = true ] ; then
+    umount /rootfs/var/local/home
+    umount /rootfs/var/local/srv
+    umount /rootfs/var
+fi
 umount /rootfs/boot
 umount /rootfs
 echo "OK"
